@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.tsbuildinfo
+release-staging-*/
+releases/*.zip
+.env
+.env.*
+!.env.example
+npm-debug.log*
