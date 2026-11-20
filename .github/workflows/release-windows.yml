@@ -4,6 +4,13 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release version tag (for example v1.0.0)
+        required: true
+        default: v1.0.0
+        type: string
 
 permissions:
   contents: write
@@ -38,12 +45,22 @@ jobs:
           Compress-Archive -Path $packageDir -DestinationPath $zipPath -Force
           "PACKAGE_PATH=$zipPath" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      - name: Choose release tag
+        shell: pwsh
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          $releaseTag = $env:REQUESTED_TAG
+          if ([string]::IsNullOrWhiteSpace($releaseTag)) { $releaseTag = $env:GITHUB_REF_NAME }
+          if ($releaseTag -notmatch '^v\d+\.\d+\.\d+$') { throw 'Use a version tag such as v1.0.0.' }
+          "RELEASE_TAG=$releaseTag" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Publish GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$env:GITHUB_REF_NAME" "$env:PACKAGE_PATH" `
-            --verify-tag `
-            --title "QuantumBridge $env:GITHUB_REF_NAME" `
+          gh release create "$env:RELEASE_TAG" "$env:PACKAGE_PATH" `
+            --title "QuantumBridge $env:RELEASE_TAG" `
             --generate-notes
+
