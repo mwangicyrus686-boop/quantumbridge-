@@ -1,8 +1,27 @@
 import readline from 'node:readline';
+import { createProjectDocuments } from './project-documents.mjs';
 
 const apiBase = (process.env.QB_MCP_API_BASE || 'http://localhost:5173').replace(/\/$/, '');
+const projectDocuments = createProjectDocuments(process.env.QB_KNOWLEDGE_ROOT);
 const supportedProtocolVersions = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 const tools = [
+  {
+    name: 'list_project_documents',
+    description: 'List Markdown and plain-text documents in the explicitly configured QuantumBridge knowledge folder. Hidden files and common generated directories are excluded.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'read_project_document',
+    description: 'Read one Markdown or plain-text document from the explicitly configured QuantumBridge knowledge folder. Paths must be relative to that folder.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        relativePath: { type: 'string', minLength: 1, maxLength: 512, description: 'Relative document path returned by list_project_documents.' },
+      },
+      required: ['relativePath'],
+      additionalProperties: false,
+    },
+  },
   {
     name: 'get_bot_fleet_snapshot',
     description: 'Read QuantumBridge bot configurations, assigned symbols, research gate summaries, and risk controls. No broker credentials are exposed.',
@@ -46,6 +65,12 @@ function toolResult(value) {
 }
 
 async function callTool(name, args = {}) {
+  if (name === 'list_project_documents') {
+    return toolResult({ root: projectDocuments.rootLabel, documents: await projectDocuments.list() });
+  }
+  if (name === 'read_project_document') {
+    return toolResult(await projectDocuments.read(args.relativePath));
+  }
   if (name === 'get_bot_fleet_snapshot') {
     return toolResult(await apiRequest('/api/mcp/state'));
   }
@@ -87,7 +112,7 @@ async function handleMessage(message) {
         protocolVersion,
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: 'quantumbridge-bots', title: 'QuantumBridge Bot Fleet', version: '1.0.0' },
-        instructions: 'Read bot and market status. Signal proposals go only to the QuantumBridge paper review inbox; this server has no broker order tool.',
+        instructions: 'Use list_project_documents and read_project_document for the explicitly configured local document folder. Bot and market tools require the QuantumBridge app to be running. Signal proposals go only to the paper review inbox; this server has no broker order tool.',
       },
     });
     return;

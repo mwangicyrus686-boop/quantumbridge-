@@ -72,39 +72,58 @@ Jarvis's account connection is separate from QuantumBridge's trading session;
 both use the same registered App ID but each needs its own OAuth login. JARVIS
 keeps its token in memory and does not place trades.
 
-## Connect MCP agents to the bot fleet
+## Connect Claude to QuantumBridge and project documents
 
-QuantumBridge includes a local stdio MCP server for MCP-compatible AI clients. Start QuantumBridge first so its local API is available at `http://localhost:5173/`, then add a server entry to the MCP client's configuration. Replace the example path with the full path to the extracted `mcp-server.mjs` file:
+The local stdio MCP server works with Claude Desktop and Claude Code. It exposes the existing bot-fleet tools and can also let Claude list and read Markdown/plain-text documents from one folder you explicitly select. It does not upload documents or change Claude Project files; use the returned document content in the current Claude conversation or Project.
+
+Use Node.js 20 or newer. Keep the QuantumBridge app running at `http://localhost:5173/` to use the bot-fleet tools. Choose a folder containing only documents you are comfortable sharing with Claude; the reader excludes hidden files, common generated folders, and non-document file types. It limits reads to 256 KiB per document and does not follow paths outside the selected folder. No API key or secret is required.
+
+### Claude Desktop (Windows)
+
+1. Open `%APPDATA%\Claude\claude_desktop_config.json` (create it if needed).
+2. Add the following `mcpServers` entry, replacing `YOUR_NAME` and the folder paths with the actual locations. Double the backslashes as shown for JSON:
 
 ```json
 {
   "mcpServers": {
-    "quantumbridge-bots": {
+    "quantumbridge": {
       "command": "node",
-      "args": ["C:/Users/your-name/Downloads/QuantumBridge/mcp-server.mjs"],
+      "args": ["C:\\Users\\YOUR_NAME\\Downloads\\QuantumBridge\\mcp-server.mjs"],
       "env": {
-        "QB_MCP_API_BASE": "http://localhost:5173"
+        "QB_MCP_API_BASE": "http://localhost:5173",
+        "QB_KNOWLEDGE_ROOT": "C:\\Users\\YOUR_NAME\\Documents\\QuantumBridge"
       }
     }
   }
 }
 ```
 
-The server provides `get_bot_fleet_snapshot`, `get_market_snapshot`, and `submit_paper_signal`. Signal proposals must use an existing bot and one of its assigned markets. They appear in **Bot Fleet → MCP Agent Inbox** for a person to record as paper or dismiss. MCP has no order placement tool; it cannot buy, sell, change risk controls, or arm live execution. The bridge is restricted to local computer connections and does not expose OAuth tokens or account identifiers.
+3. Save the file and fully restart Claude Desktop. The MCP tools `list_project_documents` and `read_project_document` expose documents on demand. To use bot tools, start QuantumBridge first; `get_bot_fleet_snapshot`, `get_market_snapshot`, and `submit_paper_signal` are also available.
 
-This connection uses MCP's local stdio transport. See the [MCP stdio transport documentation](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/serving/stdio.md) for client configuration details.
+### Claude Code
 
-## Publish with GitHub
+From PowerShell, register the local server in your user configuration, replacing the paths:
 
-The `.github/workflows/release-windows.yml` workflow builds the app and attaches a Windows ZIP to a GitHub Release whenever a `v*` version tag is pushed. The ZIP includes the built interface, local API server, MCP server, and Windows launcher. It does not publish an internet-facing app server.
+```powershell
+claude mcp add --transport stdio --scope user `
+  --env QB_MCP_API_BASE=http://localhost:5173 `
+  --env QB_KNOWLEDGE_ROOT="C:\Users\YOUR_NAME\Documents\QuantumBridge" `
+  quantumbridge -- node "C:\Users\YOUR_NAME\Downloads\QuantumBridge\mcp-server.mjs"
+```
 
-To trigger the first release after adding this project to a GitHub repository, push the source to its default branch, then create and push a version tag such as `v1.0.0`:
+Run `claude mcp list` to confirm it is configured. The folder path is a local allowlist, not a credential; do not point it at a home directory or a folder containing secrets. If QuantumBridge is not running, only the document tools work. The bot-fleet tools cannot place orders, change risk controls, or arm live execution. Paper signals are queued for human review in **Bot Fleet → MCP Agent Inbox**.
+
+## Publish the static website with GitHub Pages
+
+The `.github/workflows/deploy-pages.yml` workflow builds the Vite app and deploys its static files to GitHub Pages after pushes to `main` or a manual run. In the repository's **Settings → Pages**, set the build and deployment source to **GitHub Actions**. The first successful workflow run publishes the site at `https://<owner>.github.io/quantumbridge-/` (or the configured custom domain). This repository change configures deployment but does not itself make the site live; confirm the workflow and Pages URL in GitHub.
+
+Pages hosts only the static browser app. Simulator mode and browser-saved bot settings work there; the Node API is deliberately not exposed publicly. Deriv OAuth token exchange, account APIs, the local MCP bridge, and JARVIS integration require the local Node server and are not available on the Pages site. Use the local install for those integrations. The Pages build uses the repository subpath automatically and requires no secrets.
+
+The `.github/workflows/release-windows.yml` workflow remains available to package the full local app (including its API and MCP servers) as a Windows ZIP on version tags. To publish a release, push a tag such as `v1.0.0`:
 
 ```powershell
 git tag v1.0.0
 git push origin v1.0.0
 ```
-
-GitHub Pages is not configured for this project. Pages serves static files and does not run the Node API needed for OAuth code exchange, JARVIS, and the local MCP bridge. To offer the full app as a public website, deploy the Node server to a separate Node-capable host and configure its OAuth callback and environment settings. See [GitHub Pages' supported site types](https://docs.github.com/en/pages/getting-started-with-github-pages/creating-a-github-pages-site).
 
 The `.gitignore` file excludes dependencies, generated builds, release ZIPs, and local environment files from source control.

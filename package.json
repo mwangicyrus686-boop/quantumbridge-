@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "node dev.mjs",
     "build": "tsc -b && vite build",
-    "preview": "node api-server.mjs --serve-dist"
+    "preview": "node api-server.mjs --serve-dist",
+    "test": "node --test"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
