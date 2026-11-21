@@ -4,6 +4,7 @@ import { createReadStream } from 'node:fs';
 import { access, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { executeBotScript } from './bot-sandbox.mjs';
 
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 const distRoot = path.resolve(projectRoot, 'dist');
@@ -83,13 +84,29 @@ function sendJson(response, status, payload) {
   response.end(JSON.stringify(payload));
 }
 
-async function readJson(request) {
+async function readJson(request, maxBytes = 32_768) {
   let raw = '';
+  let bytes = 0;
   for await (const chunk of request) {
-    raw += chunk;
-    if (raw.length > 32_768) throw new Error('Request body is too large.');
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.length;
+    if (bytes > maxBytes) throw new Error('Request body is too large.');
+    raw += buffer.toString('utf8');
   }
   return raw ? JSON.parse(raw) : {};
+}
+
+function isQuantumBridgeAppOrigin(request) {
+  const origin = request.headers.origin;
+  if (!origin) return false;
+  try {
+    const parsed = new URL(origin);
+    return parsed.protocol === 'http:'
+      && ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)
+      && parsed.port === '5173';
+  } catch {
+    return false;
+  }
 }
 
 async function fetchDerivJson(url, options) {
@@ -120,6 +137,19 @@ export async function handleApiRequest(request, response) {
   const requestUrl = new URL(request.url || '/', 'http://127.0.0.1');
 
   try {
+    if (requestUrl.pathname === '/api/bots/evaluate' && request.method === 'POST') {
+      if (!isLoopbackRequest(request) || !isQuantumBridgeAppOrigin(request)) {
+        return sendJson(response, 403, { error: 'Imported bot execution accepts requests from the local QuantumBridge app only.' });
+      }
+      const body = await readJson(request, 128 * 1024);
+      try {
+        const signal = await executeBotScript(body);
+        return sendJson(response, 200, { signal });
+      } catch (error) {
+        return sendJson(response, error.statusCode || 422, { error: error.message || 'Imported bot execution failed.' });
+      }
+    }
+
     if (requestUrl.pathname.startsWith('/api/mcp/')) {
       if (!isLoopbackRequest(request)) {
         return sendJson(response, 403, { error: 'The local MCP bridge accepts connections from this computer only.' });

@@ -44,6 +44,31 @@ Starter bots now launch paused with no seeded trade history or performance claim
 
 Bot configurations and research evidence are saved in this browser. Session results reset when the app reloads. The paper preview never sends a broker order. Automated sizing is capped at the configured 0.5–2% risk per trade, and automation stops at the configured daily loss or peak-to-current realized drawdown limit. Do not treat the app's signal score or simulated P&L as evidence of a trading edge.
 
+## Import bot configurations and scripts
+
+Choose **Bot Fleet → Import Bots** to import JSON bot configurations, `.qbot` packages, or standalone `.mjs`, `.js`, and `.py` strategies. JSON can contain one bot, an array of bots, or a `bots` array. A package can include both settings and a script:
+
+```json
+{
+  "format": "quantumbridge-bot",
+  "version": 1,
+  "bot": {
+    "name": "Example strategy",
+    "symbols": ["R_75"],
+    "minAccuracy": 80,
+    "stakeUsd": 10
+  },
+  "script": {
+    "runtime": "node",
+    "source": "export function evaluate(context) { const market = context.markets[0]; return { action: market.bias, symbol: market.symbol, rationale: 'Use the current signal' }; }"
+  }
+}
+```
+
+Scripts must export/default-export `evaluate(context)` in Node.js or define `evaluate(context)` in Python. The context contains the bot's bounded settings, assigned market snapshots, recent price history, and a timestamp. Return `{ "action": "BUY" | "SELL" | "HOLD", "symbol": "assigned market", "rationale": "why" }`. Imports start paused, receive new IDs, and have research evidence reset. Imports are limited to 25 bots, 256 KiB per file, and 32 KiB per script.
+
+Script execution requires the local QuantumBridge app and Docker Desktop/Engine running; it is unavailable on GitHub Pages. On Windows, if WSL 2 is not installed, run `wsl --install --no-distribution` in an elevated PowerShell window and restart if prompted, then start Docker Desktop and wait for its Engine to be ready. The server runs each evaluation in an isolated Node.js or Python container with no network, no broker credentials, a read-only source mount, resource limits, a 15-second timeout, and bounded input/output. Docker pulls the official runtime image if it is not already present. The script can propose a signal only: QuantumBridge verifies its action and assigned symbol, then routes it through the bot's existing live-arm, research, position, sizing, and loss-limit gates. Scripts do not receive broker credentials and cannot directly place orders. Imported source is stored with that bot in the browser's local storage.
+
 ## Connect JARVIS Workshop
 
 Run the JARVIS Trading Workshop separately from its desktop Bot Control Center:

@@ -32,6 +32,7 @@ import {
   OctagonAlert,
   ExternalLink,
   Link2,
+  Search,
   RefreshCw,
   UserCheck,
   Plus,
@@ -52,8 +53,11 @@ import {
   BookOpen,
   Compass as CompassIcon,
   Eye,
-  EyeOff
+  EyeOff,
+  Upload
 } from 'lucide-react';
+import { filterBotCatalog, type BotCatalogFilter } from '../bot-catalog.mjs';
+import { parseBotImport, botImportLimits } from '../bot-package.mjs';
 
 // ============================================================================
 // BRAND LOGO: CUSTOM "Q" WITH RISING TRADING GRAPH & CANDLESTICKS
@@ -133,6 +137,15 @@ const QuantumBridgeLogo = ({ className = 'w-10 h-10' }) => (
 // ============================================================================
 // VISUAL THEMES CONFIGURATION
 // ============================================================================
+
+const DERIV_PARTNER_SIGNUP_URL = 'https://t.deriv.link?t=QTZ6HZF7GYP2';
+const BOT_CATALOG_FILTERS: Array<{ id: BotCatalogFilter; label: string }> = [
+  { id: 'all', label: 'All bots' },
+  { id: 'active', label: 'Active' },
+  { id: 'synthetics', label: 'Synthetic markets' },
+  { id: 'fx-metals', label: 'FX & metals' },
+  { id: 'custom', label: 'Custom & imported' },
+];
 
 const APP_THEMES = {
   quantum_emerald: {
@@ -598,7 +611,8 @@ const INITIAL_DERIV_BOTS = [
 const BOT_CONFIG_STORAGE_KEY = 'quantumbridge.botConfigs.v1';
 const BOT_CONFIG_FIELDS = [
   'name', 'strategy', 'symbols', 'lotSize', 'stakeUsd', 'multiplier',
-  'minAccuracy', 'slPips', 'tpPips', 'cooldownMs', 'researchEvidence'
+  'minAccuracy', 'slPips', 'tpPips', 'cooldownMs', 'researchEvidence',
+  'scriptRuntime', 'scriptSource'
 ];
 
 const loadBotConfigurations = () => {
@@ -1153,7 +1167,17 @@ export default function App() {
   // Bot Space Expansion & New Bot Creator State
   const [botViewLayout, setBotViewLayout] = useState('expanded'); // 'expanded' | 'compact'
   const [expandedBotConfigId, setExpandedBotConfigId] = useState('DRV-V75-01');
+  const [botCatalogFilter, setBotCatalogFilter] = useState<BotCatalogFilter>('all');
+  const [botSearchQuery, setBotSearchQuery] = useState('');
   const [showNewBotModal, setShowNewBotModal] = useState(false);
+  const filteredBots = useMemo(
+    () => filterBotCatalog(bots, botCatalogFilter, botSearchQuery, markets),
+    [bots, botCatalogFilter, botSearchQuery, markets]
+  );
+  const botImportInputRef = useRef<HTMLInputElement | null>(null);
+  const scriptEvaluationPendingRef = useRef(new Set<string>());
+  const canRunLocalBotScripts = typeof window !== 'undefined'
+    && ['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname);
   const [newBotForm, setNewBotForm] = useState({
       name: 'Gold & V100 Research Bot',
       strategy: 'Hypothesis: Multi-Timeframe Liquidity Sweep + RSI Divergence',
@@ -1385,6 +1409,9 @@ export default function App() {
     }
     if (!codeVerifier || !clientId || !redirectUri) {
       return failLogin('The secure sign-in session is incomplete. Start OAuth login again.');
+    }
+    if (window.location.hostname.endsWith('.github.io')) {
+      return failLogin('Deriv returned to QuantumBridge, but GitHub Pages has no OAuth API server to finish connecting. Use the local QuantumBridge app for account sign-in.');
     }
 
     setOauthConnecting(true);
@@ -1734,9 +1761,18 @@ export default function App() {
           setAuthError(message.error.message || 'Deriv rejected the account WebSocket request.');
           return;
         }
-        if (message.msg_type === 'balance' && message.balance) {
+        if (message.msg_type === 'balance' && message.balance !== undefined && message.balance !== null) {
           const balance = Number(message.balance.balance ?? message.balance);
-          if (Number.isFinite(balance)) setAccountBalance(balance);
+          if (Number.isFinite(balance)) {
+            const currency = message.balance.currency;
+            setAccountBalance(balance);
+            if (currency) setAccountCurrency(currency);
+            setConnectedAccounts((previous) => previous.map((connectedAccount) => (
+              connectedAccount.accountId === account.accountId
+                ? { ...connectedAccount, balance, currency: currency || connectedAccount.currency }
+                : connectedAccount
+            )));
+          }
         }
         if (message.msg_type === 'tick' && message.tick) {
           const symbol = message.tick.symbol;
@@ -1829,12 +1865,40 @@ export default function App() {
     setIsRefreshingBalance(true);
     try {
       if (
-        derivWsRef.current &&
-        derivWsRef.current.readyState === WebSocket.OPEN &&
-        connectionMethod === 'DERIV_OAUTH'
+        connectionMethod === 'DERIV_OAUTH' &&
+        oauthAccessToken &&
+        activeAccountId
       ) {
-        derivWsRef.current.send(JSON.stringify({ balance: 1 }));
-        triggerToast('Live Balance Synced', `Queried WebSocket for ${activeAccountId}`, 'emerald');
+        const response = await fetch('/api/deriv/accounts', {
+          headers: { Authorization: `Bearer ${oauthAccessToken}` }
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || 'Deriv could not refresh account balances.');
+        const rawAccounts = Array.isArray(result.data)
+          ? result.data
+          : Array.isArray(result.data?.accounts) ? result.data.accounts : [];
+        const refreshedAccount = rawAccounts.find((account) => (
+          String(account.account_id || account.loginid || '') === activeAccountId
+        ));
+        if (!refreshedAccount || refreshedAccount.balance === null || !Number.isFinite(Number(refreshedAccount.balance))) {
+          throw new Error('Deriv did not return a balance for the selected account.');
+        }
+
+        const balance = Number(refreshedAccount.balance);
+        const currency = refreshedAccount.currency || accountCurrency;
+        setAccountBalance(balance);
+        setAccountCurrency(currency);
+        setConnectedAccounts((previous) => previous.map((account) => (
+          account.accountId === activeAccountId ? { ...account, balance, currency } : account
+        )));
+        if (derivWsRef.current?.readyState === WebSocket.OPEN) {
+          derivWsRef.current.send(JSON.stringify({ balance: 1 }));
+        }
+        triggerToast(
+          `${connectionStatus === 'DEMO_CONNECTED' ? 'Demo' : 'Real'} Balance Updated`,
+          `${activeAccountId} • ${balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`,
+          connectionStatus === 'DEMO_CONNECTED' ? 'emerald' : 'cyan'
+        );
       } else if (connectionMethod === 'CTRADER_LOCAL') {
         const res = await fetch(ctraderEndpoint.replace(/\/$/, ''), { method: 'GET' });
         const syncData = await res.json();
@@ -1854,8 +1918,8 @@ export default function App() {
           'amber'
         );
       }
-    } catch (e) {
-      triggerToast('Balance Sync Failed', 'Unable to reach broker endpoint.', 'crimson');
+    } catch (error) {
+      triggerToast('Balance Sync Failed', error.message || 'Unable to reach broker endpoint.', 'crimson');
     } finally {
       setTimeout(() => setIsRefreshingBalance(false), 500);
     }
@@ -1933,10 +1997,21 @@ export default function App() {
     setAutoExecuteEnabled(true);
   };
 
-  const dispatchDerivSignal = (bot, market, forcedAccuracy = null, options: { paperOnly?: boolean } = {}) => {
+  const dispatchDerivSignal = (bot, market, forcedAccuracy = null, options: {
+    paperOnly?: boolean;
+    actionOverride?: 'BUY' | 'SELL' | 'HOLD';
+    rationale?: string;
+  } = {}) => {
     if (!bridgeConnectedRef.current) return;
 
     const paperOnly = options.paperOnly === true;
+    const action = options.actionOverride || market.bias;
+    if (action === 'HOLD') {
+      setBots((prev) => prev.map((item) => item.id === bot.id ? { ...item, lastExecutedAt: Date.now() } : item));
+      return;
+    }
+    if (action !== 'BUY' && action !== 'SELL') return;
+
     const isLiveAccount = connectionStatusRef.current === 'LIVE_CONNECTED';
     if (isLiveAccount && !liveExecutionArmedRef.current && !paperOnly) {
       return;
@@ -1965,7 +2040,6 @@ export default function App() {
 
     const mode = executionModeRef.current;
     const accuracy = forcedAccuracy ?? market.accuracy;
-    const action = market.bias;
     const entryPrice = market.price;
     const riskPct = Math.min(2, Math.max(0.5, Number(perTradeMaxRiskRef.current) || 1));
     const maxTradeRiskUsd = Number(accountBalanceRef.current || 0) * riskPct / 100;
@@ -2020,7 +2094,8 @@ export default function App() {
             takeProfit: Number(tp.toFixed(market.digits)),
             stopLossPips: bot.slPips,
             takeProfitPips: bot.tpPips,
-            autoCloseBeforeSpike: autoCloseSpikeRef.current
+            autoCloseBeforeSpike: autoCloseSpikeRef.current,
+            strategyRationale: options.rationale || null
           }
         : {
             signalId,
@@ -2036,7 +2111,8 @@ export default function App() {
             digitEdgeHint: `DIGITDIFF_${sortedDigits[sortedDigits.length - 1].digit} / HOT_${hottestDigit.digit}`,
             stakeUsd: safeStakeUsd,
             multiplier: bot.multiplier,
-            accuracyScore: accuracy
+            accuracyScore: accuracy,
+            strategyRationale: options.rationale || null
           };
 
     if (!paperOnly && mode === 'DERIV_WS_OPTIONS' && (
@@ -2099,7 +2175,7 @@ export default function App() {
       time: timeStr,
       type: 'EXECUTION',
       title: `${paperOnly ? '[PAPER TEST]' : isLiveAccount ? '[LIVE REAL]' : '[DEMO/SIM]'} #${ticketId} • ${market.ctraderName}`,
-      summary: `${bot.name} → ${action} ${mode === 'CTRADER_CFD' ? `${safeLotSize} lots` : `$${safeStakeUsd} Stake`} @ ${entryPrice.toFixed(market.digits)} (Signal Score: ${accuracy}%)`,
+      summary: `${bot.name} → ${action} ${mode === 'CTRADER_CFD' ? `${safeLotSize} lots` : `$${safeStakeUsd} Stake`} @ ${entryPrice.toFixed(market.digits)} (Signal Score: ${accuracy}%)${options.rationale ? ` | ${options.rationale}` : ''}`,
       payload: jsonPayload
     };
 
@@ -2131,6 +2207,74 @@ export default function App() {
             if (now - bot.lastExecutedAt < bot.cooldownMs) continue;
             const botOpenCount = positionsRef.current.filter((p) => p.botId === bot.id).length;
             if (botOpenCount >= 2) continue;
+
+            if (bot.scriptRuntime && bot.scriptSource) {
+              if (!canRunLocalBotScripts || scriptEvaluationPendingRef.current.has(bot.id)) continue;
+              const scriptMarkets = marketsRef.current
+                .filter((market) => bot.symbols.includes(market.symbol))
+                .map((market) => ({
+                  symbol: market.symbol,
+                  price: market.price,
+                  bias: market.bias,
+                  accuracy: market.accuracy,
+                  rsi: market.rsi,
+                  spikeProb: market.spikeProb ?? null,
+                  pipSize: market.pipSize || 0.00001,
+                  digits: market.digits || 2,
+                  history: Array.isArray(market.history) ? market.history.slice(-50) : [],
+                }));
+              if (scriptMarkets.length === 0) continue;
+
+              scriptEvaluationPendingRef.current.add(bot.id);
+              setBots((prev) => prev.map((item) => item.id === bot.id ? { ...item, lastExecutedAt: now } : item));
+              const botConfig = {
+                id: bot.id,
+                name: bot.name,
+                strategy: bot.strategy,
+                symbols: bot.symbols,
+                lotSize: bot.lotSize,
+                stakeUsd: bot.stakeUsd,
+                multiplier: bot.multiplier,
+                minAccuracy: bot.minAccuracy,
+                slPips: bot.slPips,
+                tpPips: bot.tpPips,
+                cooldownMs: bot.cooldownMs,
+              };
+
+              void fetch('/api/bots/evaluate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  bot: botConfig,
+                  script: { runtime: bot.scriptRuntime, source: bot.scriptSource },
+                  markets: scriptMarkets,
+                }),
+                signal: AbortSignal.timeout(20_000),
+              })
+                .then(async (response) => {
+                  const payload = await response.json().catch(() => ({}));
+                  if (!response.ok) throw new Error(payload.error || `Local bot runner returned HTTP ${response.status}.`);
+                  return payload.signal;
+                })
+                .then((signal) => {
+                  if (!signal || signal.action === 'HOLD') return;
+                  const currentBot = botsRef.current.find((item) => item.id === bot.id);
+                  if (!currentBot?.active || !autoExecuteRef.current || !bridgeConnectedRef.current) return;
+                  if (!currentBot.symbols.includes(signal.symbol)) return;
+                  const market = marketsRef.current.find((item) => item.symbol === signal.symbol);
+                  if (!market || market.accuracy < currentBot.minAccuracy) return;
+                  if (positionsRef.current.filter((position) => position.botId === currentBot.id).length >= 2) return;
+                  dispatchDerivSignal(currentBot, market, null, {
+                    actionOverride: signal.action,
+                    rationale: signal.rationale,
+                  });
+                })
+                .catch((error) => {
+                  triggerToast('Imported Bot Error', error.message || 'The isolated script runner failed.', 'crimson');
+                })
+                .finally(() => scriptEvaluationPendingRef.current.delete(bot.id));
+              break;
+            }
 
             const candidateMarket = marketsRef.current.find(
               (m) => bot.symbols.includes(m.symbol) && m.accuracy >= bot.minAccuracy
@@ -2422,8 +2566,15 @@ export default function App() {
     // On a published deployment, use that deployment's own callback path.
     return `${window.location.origin}${window.location.pathname}`;
   }, [customRedirectUriInput]);
+  const isGitHubPages = typeof window !== 'undefined' && window.location.hostname.endsWith('.github.io');
 
   const handleOAuthLogin = async () => {
+    if (isGitHubPages) {
+      setAuthError('Deriv OAuth account connections require the local QuantumBridge app. This GitHub Pages site has no secure server for the OAuth code exchange or account API.');
+      setShowConnectModal(true);
+      return;
+    }
+
     const clientId = derivAppId.trim();
     if (!clientId) {
       setAuthError('Enter the App ID from your registered Deriv Web-based OAuth app in App ID Settings.');
@@ -2658,6 +2809,8 @@ export default function App() {
       lastExecutedAt: 0
     };
     setBots((prev) => [...prev, createdBot]);
+    setBotCatalogFilter('all');
+    setBotSearchQuery('');
     setExpandedBotConfigId(newId);
     setShowNewBotModal(false);
     triggerToast(`Bot Deployed: ${createdBot.name}`, `Assigned ID ${newId} • Monitoring ${createdBot.symbols.join(', ')}`, 'emerald');
@@ -2670,6 +2823,47 @@ export default function App() {
     }
     setBots((prev) => prev.filter((b) => b.id !== botId));
     triggerToast('Bot Instance Removed', `Decommissioned ${botId}`, 'crimson');
+  };
+
+  const handleImportBotFiles = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const files = Array.from(input.files || []);
+    input.value = '';
+    if (files.length === 0) return;
+
+    try {
+      const importedBots = [];
+      const availableSymbols = markets.map((market) => market.symbol);
+      for (const file of files) {
+        if (file.size > botImportLimits.maxImportBytes) {
+          throw new Error(`${file.name} exceeds the ${botImportLimits.maxImportBytes}-byte import limit.`);
+        }
+        importedBots.push(...parseBotImport(
+          file.name,
+          await file.text(),
+          availableSymbols,
+          INITIAL_DERIV_BOTS[0]
+        ));
+        if (importedBots.length > botImportLimits.maxBots) {
+          throw new Error(`Import no more than ${botImportLimits.maxBots} bots at a time.`);
+        }
+      }
+
+      if (importedBots.length === 0) throw new Error('No bot configurations were found in the selected files.');
+      setBots((prev) => [...prev, ...importedBots]);
+      setBotCatalogFilter('all');
+      setBotSearchQuery('');
+      setActivePage('BOTS');
+      setExpandedBotConfigId(importedBots[0].id);
+      const scriptCount = importedBots.filter((bot) => bot.scriptRuntime).length;
+      triggerToast(
+        'Bots Imported',
+        `${importedBots.length} bot${importedBots.length === 1 ? '' : 's'} added paused; research evidence reset.${scriptCount ? ` ${scriptCount} isolated script${scriptCount === 1 ? '' : 's'} ready.` : ''}`,
+        'emerald'
+      );
+    } catch (error) {
+      triggerToast('Bot Import Failed', error.message || 'The selected files could not be imported.', 'crimson');
+    }
   };
 
   const MODULE_CLASSES = [
@@ -2863,7 +3057,7 @@ export default function App() {
                 <button
                   onClick={handleRefreshLiveBalance}
                   className="text-slate-400 hover:text-emerald-400 transition-colors"
-                  title="Sync Real Account Balance"
+                  title={`Refresh ${connectionStatus === 'DEMO_CONNECTED' ? 'Demo' : 'Real'} Account Balance`}
                 >
                   <RefreshCw className={`w-3 h-3 ${isRefreshingBalance ? 'animate-spin text-emerald-400' : ''}`} />
                 </button>
@@ -3167,7 +3361,7 @@ export default function App() {
                   <QuantumBridgeLogo className="w-12 h-12 shrink-0" />
                   <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-mono">
                     <Compass className="w-3.5 h-3.5" />
-                    <span>QUANTUMBRIDGE COMMAND DIRECTORY • WEB OAUTH 2.0 ENABLED</span>
+                    <span>QUANTUMBRIDGE COMMAND DIRECTORY • {isGitHubPages ? 'OAUTH AVAILABLE IN LOCAL APP' : 'WEB OAUTH 2.0 ENABLED'}</span>
                   </div>
                 </div>
                 <h2 className="text-2xl sm:text-4xl font-extrabold tracking-tight text-white">
@@ -3177,7 +3371,9 @@ export default function App() {
                   </span>
                 </h2>
                 <p className="text-sm text-slate-300 leading-relaxed">
-                  Sign in through Deriv OAuth 2.0 with PKCE, connect an Options account, and monitor synthetic market signals. Live bot execution starts paused.
+                  {isGitHubPages
+                    ? 'Connect a Deriv account in the local QuantumBridge app. This static website supports market previews but does not host the secure OAuth server.'
+                    : 'Sign in through Deriv OAuth 2.0 with PKCE, connect an Options account, and monitor synthetic market signals. Live bot execution starts paused.'}
                 </p>
 
                 <div className="flex flex-wrap items-center gap-3 pt-2">
@@ -3190,6 +3386,16 @@ export default function App() {
                     <span>Sign in with OAuth 2.0</span>
                     <ExternalLink className="w-3.5 h-3.5" />
                   </button>
+
+                  <a
+                    href={DERIV_PARTNER_SIGNUP_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-slate-800/90 hover:bg-slate-700 text-slate-100 border border-slate-700 text-xs font-bold transition-all"
+                  >
+                    <span>Open a Deriv account</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
 
                   <button
                     onClick={() => setActivePage('BOTS')}
@@ -3208,6 +3414,9 @@ export default function App() {
                     <span>Connection Options</span>
                   </button>
                 </div>
+                <p className="text-[10px] text-slate-500">
+                  Partner disclosure: QuantumBridge may earn a commission if you sign up through this link and qualify under Deriv’s terms. Trading involves risk.
+                </p>
               </div>
 
               {/* OAuth 2.0 Redirect Flow Live Card */}
@@ -3725,6 +3934,23 @@ export default function App() {
               </div>
 
               <div className="flex items-center gap-2.5 flex-wrap">
+                <input
+                  ref={botImportInputRef}
+                  type="file"
+                  accept=".json,.qbot,.mjs,.js,.py"
+                  multiple
+                  className="hidden"
+                  aria-label="Import bot configurations or scripts"
+                  onChange={handleImportBotFiles}
+                />
+                <button
+                  onClick={() => botImportInputRef.current?.click()}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-700 hover:bg-cyan-600 text-white text-xs font-bold shadow-md shadow-cyan-950/50 transition-colors"
+                  title="Import JSON bot configs or sandboxed Node.js/Python scripts"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>Import Bots</span>
+                </button>
                 <div className="text-xs font-mono text-slate-400 bg-[#080b10] px-3 py-1.5 rounded-lg border border-slate-800">
                   Running:{' '}
                   <strong className="text-emerald-400">{bots.filter((b) => b.active).length}</strong> / {bots.length} Bots
@@ -3767,6 +3993,42 @@ export default function App() {
               </div>
             </div>
 
+            <div className="mb-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <label className="flex min-w-[220px] flex-1 items-center gap-2 rounded-lg border border-slate-800 bg-[#080b10] px-3 py-2">
+                  <Search className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+                  <input
+                    type="search"
+                    value={botSearchQuery}
+                    onChange={(event) => setBotSearchQuery(event.target.value)}
+                    placeholder="Search bot name, strategy, or market"
+                    aria-label="Search bot catalog"
+                    className="w-full bg-transparent text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none"
+                  />
+                </label>
+                <span className="text-[10px] font-mono text-slate-500">
+                  Showing {filteredBots.length} of {bots.length} bots
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filter bot catalog">
+                {BOT_CATALOG_FILTERS.map((filter) => (
+                  <button
+                    key={filter.id}
+                    type="button"
+                    aria-pressed={botCatalogFilter === filter.id}
+                    onClick={() => setBotCatalogFilter(filter.id)}
+                    className={`rounded-full border px-3 py-1 text-[10px] font-semibold transition-colors ${
+                      botCatalogFilter === filter.id
+                        ? 'border-cyan-500/50 bg-cyan-500/15 text-cyan-200'
+                        : 'border-slate-800 bg-[#080b10] text-slate-400 hover:border-slate-600 hover:text-slate-200'
+                    }`}
+                  >
+                    {filter.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div
               className={`grid gap-4 ${
                 botViewLayout === 'expanded'
@@ -3774,7 +4036,22 @@ export default function App() {
                   : 'grid-cols-1 md:grid-cols-3'
               }`}
             >
-              {bots.map((bot) => {
+              {filteredBots.length === 0 ? (
+                <div className="col-span-full rounded-xl border border-dashed border-slate-700 bg-[#080b10]/70 px-4 py-8 text-center">
+                  <p className="text-sm font-semibold text-slate-200">No matching strategies</p>
+                  <p className="mt-1 text-xs text-slate-500">Try another search or clear the current filters.</p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBotCatalogFilter('all');
+                      setBotSearchQuery('');
+                    }}
+                    className="mt-3 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-3 py-1.5 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-500/20"
+                  >
+                    Clear filters
+                  </button>
+                </div>
+              ) : filteredBots.map((bot) => {
                 const isTuningOpen = expandedBotConfigId === bot.id;
                 const researchEvidence = { ...createEmptyResearchEvidence(), ...(bot.researchEvidence || {}) };
                 const research = evaluateBotResearch(researchEvidence);
@@ -3815,11 +4092,15 @@ export default function App() {
                           </button>
 
                           <button
-                            onClick={() =>
+                            onClick={() => {
+                              if (!bot.active && bot.scriptRuntime && !canRunLocalBotScripts) {
+                                triggerToast('Local Runner Required', 'Imported scripts run only through the local sandboxed app, not on GitHub Pages.', 'amber');
+                                return;
+                              }
                               setBots((prev) =>
                                 prev.map((b) => (b.id === bot.id ? { ...b, active: !b.active } : b))
-                              )
-                            }
+                              );
+                            }}
                             className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold transition-colors ${
                               bot.active
                                 ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
@@ -3835,6 +4116,14 @@ export default function App() {
                       {/* Bot Name & Strategy */}
                       <h3 className="text-sm font-bold text-white mb-1">{bot.name}</h3>
                       <p className="text-xs text-slate-400 leading-relaxed mb-3">{bot.strategy}</p>
+                      {bot.scriptRuntime && (
+                        <details className="mb-3 rounded-lg border border-cyan-500/30 bg-cyan-950/20">
+                          <summary className="cursor-pointer px-3 py-2 text-[10px] font-mono font-bold uppercase text-cyan-300">
+                            Sandboxed {bot.scriptRuntime === 'node' ? 'Node.js' : 'Python'} script · local runner only
+                          </summary>
+                          <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words border-t border-cyan-500/20 p-3 text-[10px] leading-relaxed text-slate-300">{bot.scriptSource}</pre>
+                        </details>
+                      )}
 
                       <div className={`mb-3 p-2.5 rounded-lg border ${research.approved ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-amber-500/10 border-amber-500/30'}`}>
                         <div className="flex items-center justify-between gap-2">
@@ -4611,8 +4900,10 @@ export default function App() {
             <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
               {connectTab === 'oauth' && (
                 <div className="space-y-4">
-                  <div className="p-3 rounded-lg bg-cyan-500/10 border border-cyan-500/30 text-cyan-100/90 text-xs leading-relaxed">
-                    Sign in on Deriv using the registered Web-based app. The app uses OAuth 2.0 with PKCE; never paste an API token here.
+                  <div className={`p-3 rounded-lg border text-xs leading-relaxed ${isGitHubPages ? 'bg-amber-500/10 border-amber-500/30 text-amber-100' : 'bg-cyan-500/10 border-cyan-500/30 text-cyan-100/90'}`}>
+                    {isGitHubPages
+                      ? 'Deriv sign-in is unavailable on GitHub Pages because the secure OAuth exchange and account API run only in the local app. Download and launch QuantumBridge locally to connect an account.'
+                      : 'Sign in on Deriv using the registered Web-based app. The app uses OAuth 2.0 with PKCE; never paste an API token here.'}
                   </div>
                   <div>
                     <label className="block font-mono uppercase text-[10px] text-slate-400 mb-1.5">Deriv App ID</label>
@@ -4630,15 +4921,29 @@ export default function App() {
                     <div className="w-full bg-[#080b10] border border-slate-800 rounded-lg px-3 py-2 text-slate-300 font-mono text-[11px] break-all">{oauthRedirectUri}</div>
                     <p className="text-[10px] text-slate-500 mt-1">Add this exact URL to the app’s Redirect URLs in Deriv Developers.</p>
                   </div>
+                  <div className="rounded-lg border border-slate-800 bg-[#080b10] p-3">
+                    <a
+                      href={DERIV_PARTNER_SIGNUP_URL}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 text-xs font-bold text-cyan-300 hover:text-cyan-200"
+                    >
+                      Open a Deriv account
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </a>
+                    <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
+                      Partner link: QuantumBridge may earn a commission if you sign up and qualify under Deriv’s terms. Trading involves risk.
+                    </p>
+                  </div>
                   {authError && <div role="alert" className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-200 text-xs">{authError}</div>}
                   <div className="flex justify-end pt-2">
                     <button
                       type="button"
                       onClick={handleOAuthLogin}
-                      disabled={oauthConnecting}
+                      disabled={oauthConnecting || isGitHubPages}
                       className="flex items-center gap-2 px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-60 text-white font-bold transition-colors shadow-lg shadow-cyan-950/50"
                     >
-                      <span>{oauthConnecting ? 'Connecting…' : 'Continue to Deriv Login'}</span>
+                      <span>{oauthConnecting ? 'Connecting…' : isGitHubPages ? 'Local App Required' : 'Continue to Deriv Login'}</span>
                       <ExternalLink className="w-4 h-4" />
                     </button>
                   </div>

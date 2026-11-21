@@ -40,7 +40,7 @@ jobs:
           $packageDir = Join-Path $env:RUNNER_TEMP 'QuantumBridge'
           $zipPath = Join-Path $env:RUNNER_TEMP 'QuantumBridge_MCP_Bot_Server_Windows.zip'
           New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
-          Copy-Item -LiteralPath 'api-server.mjs','mcp-server.mjs','project-documents.mjs','Launch QuantumBridge.bat','README.md' -Destination $packageDir
+          Copy-Item -LiteralPath 'api-server.mjs','bot-sandbox.mjs','mcp-server.mjs','project-documents.mjs','Launch QuantumBridge.bat','README.md' -Destination $packageDir
           Copy-Item -LiteralPath 'dist' -Destination $packageDir -Recurse
           Compress-Archive -Path $packageDir -DestinationPath $zipPath -Force
           "PACKAGE_PATH=$zipPath" | Out-File -FilePath $env:GITHUB_ENV -Append
